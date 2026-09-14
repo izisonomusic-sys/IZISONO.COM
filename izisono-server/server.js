@@ -34,8 +34,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Le webhook Stripe a besoin du corps brut
-app.use('/api/billing/webhook', express.raw({ type: 'application/json' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
@@ -45,7 +43,7 @@ app.get('/api/config', (req, res) => {
   res.json({
     app: 'izisono',
     supabase: { url: process.env.SUPABASE_URL || '', publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY || '' },
-    version: '1.0.0',
+    version: '1.1.0',
     languages: SUPPORTED_LANGUAGES,
     currency: {
       code: CURRENCY_CONFIG.code,
