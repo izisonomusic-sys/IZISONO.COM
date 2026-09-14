@@ -27,7 +27,6 @@ app.use(cors({
 
 // Middleware pour détecter la langue et la monnaie
 app.use((req, res, next) => {
-  // Détecter la langue depuis l'entête Accept-Language ou le query param
   const browserLang = req.acceptsLanguages(Object.keys(SUPPORTED_LANGUAGES));
   req.language = req.query.lang || req.headers['accept-language']?.split(',')[0]?.split('-')[0] || browserLang || 'fr';
   req.currency = CURRENCY_CONFIG;
@@ -102,7 +101,16 @@ app.get('/script.js', async (_req, res) => {
   try {
     const file = await resolveFrontendFile('script.js');
     if (!file) throw new Error('frontend_script_not_found');
-    const source = await fs.readFile(file, 'utf8');
+    let source = await fs.readFile(file, 'utf8');
+
+    // The original frontend loaded Supabase directly from third-party CDNs. In
+    // production this can be blocked by CSP, privacy extensions, corporate
+    // filters, or transient CDN failures. Keep the frontend unchanged while
+    // making its Supabase import same-origin and therefore much more reliable.
+    const loader = `\nasync function loadSupabaseClient(){\n  if(window.supabase?.createClient)return window.supabase.createClient;\n  await new Promise((resolve,reject)=>{\n    const s=document.createElement('script');\n    s.src='/supabase-client.js';\n    s.async=true;\n    s.onload=()=>resolve();\n    s.onerror=()=>reject(new Error('Impossible de charger le module Supabase depuis le serveur.'));\n    document.head.appendChild(s);\n  });\n  if(!window.supabase?.createClient)throw new Error('Le module Supabase est indisponible.');\n  return window.supabase.createClient;\n}\n`;
+    source = source.replace('async function bootSupabase(){', loader + 'async function bootSupabase(){');
+    source = source.replace("  let createClient;\n  try{\n    ({createClient}=await import('https://esm.sh/@supabase/supabase-js@2'));\n  }catch(first){\n    console.warn('Supabase CDN esm.sh indisponible, tentative jsDelivr',first);\n    try{\n      ({createClient}=await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'));\n    }catch(second){\n      throw new Error('Impossible de charger le module Supabase. Vérifie ta connexion ou désactive le bloqueur de contenu.');\n    }\n  }", "  const createClient=await loadSupabaseClient();");
+
     res.set({
       'Content-Type': 'application/javascript; charset=UTF-8',
       'Cache-Control': 'no-store'
@@ -111,6 +119,40 @@ app.get('/script.js', async (_req, res) => {
   } catch (error) {
     console.error('Failed to serve frontend script:', error);
     res.status(500).type('text/plain').send('frontend_script_unavailable');
+  }
+});
+
+// Proxy the browser UMD build through the same Render origin. This avoids
+// browser-side cross-origin/module loading failures while keeping the SDK
+// public (it contains no Supabase secret; only the publishable key is used).
+let supabaseClientSdkCache = null;
+let supabaseClientSdkPromise = null;
+app.get('/supabase-client.js', async (_req, res) => {
+  try {
+    if (!supabaseClientSdkCache) {
+      if (!supabaseClientSdkPromise) {
+        supabaseClientSdkPromise = fetch('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js')
+          .then(async r => {
+            if (!r.ok) throw new Error(`Supabase SDK HTTP ${r.status}`);
+            return r.text();
+          })
+          .then(source => {
+            if (!source.includes('createClient')) throw new Error('Supabase SDK invalide');
+            supabaseClientSdkCache = source;
+            return source;
+          })
+          .finally(() => { supabaseClientSdkPromise = null; });
+      }
+      await supabaseClientSdkPromise;
+    }
+    res.set({
+      'Content-Type': 'application/javascript; charset=UTF-8',
+      'Cache-Control': 'public, max-age=3600'
+    });
+    res.status(200).send(supabaseClientSdkCache);
+  } catch (error) {
+    console.error('Failed to proxy Supabase browser SDK:', error);
+    res.status(502).type('text/plain').send('supabase_client_unavailable');
   }
 });
 
